@@ -1,0 +1,280 @@
+WITH
+
+PLACES AS (
+
+WITH
+
+-- obtiene todos los places con estado estancado en drop-off
+
+DO_TOTAL AS (
+
+	SELECT 			BPP.SHP_SHIPMENT_ID,
+					  s.shp_type,
+					 C4.shp_status C4_SHP_STATUS,
+					  s.shp_datetime_shipped_id ,
+					  s.shp_datetime_delivered_id,
+						shp_inb_reject_reason,
+						TMS_HUB_STATUS_ID 
+	 
+	FROM    	`SBOX_CX_BI_ADS_CORE.BT_CX_BPP_CAUSE` BPP
+
+	INNER JOIN 	`WHOWNER.BT_SHP_SHIPMENTS` 					S 			
+														ON     	BPP.SIT_SITE_ID			= S.SIT_SITE_ID
+														AND 	BPP.SHP_SHIPMENT_ID 	= S.SHP_SHIPMENT_ID
+
+	INNER JOIN 	`WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS` 	ec1 
+														ON     	EC1.SIT_SITE_ID   		= BPP.SIT_SITE_ID
+														AND 	ec1.shp_shipment_id		= s.shp_shipment_id  
+														and 	ec1.shp_status       	= 'ready_to_ship' 
+														and 	ec1.shp_sub_status   	= 'dropped_off'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS   	ec2 
+														on     	EC2.SIT_SITE_ID      	= BPP.SIT_SITE_ID
+														AND 	ec2.shp_shipment_id  	= s.shp_shipment_id  
+														and 	ec2.shp_status       	= 'ready_to_ship' 
+														and 	ec2.shp_sub_status   	= 'picked_up'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec3 
+														ON    	EC3.SIT_SITE_ID       	= BPP.SIT_SITE_ID
+														AND 	ec3.shp_shipment_id   	= s.shp_shipment_id  
+														and 	ec3.shp_status        	= 'ready_to_ship' 
+														and 	ec3.shp_sub_status    	= 'in_hub'
+
+	LEFT JOIN WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		C4 
+														on   	C4.SHP_SHIPMENT_ID		= S.SHP_SHIPMENT_ID  
+														AND  	C4.shp_status        	= 'delivered'
+
+	LEFT JOIN WHOWNER.BT_TMS_TRACKING 						tms  
+														ON     	(S.SHP_SHIPMENT_id   	= tms.shp_shipment_id)
+
+	WHERE		BPP.SIT_SITE_ID        	=  'MLM'
+		AND 	DATE_CREATED            >= CAST('2022-07-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND 	DATE_CREATED            <  CAST('2022-08-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND 	BPP.CARRIER_ID          = 'MELI Logistics'
+--filtrar budget = mercado envios
+		AND 	S.shp_picking_type_id   in ( 'cross_docking','xd_drop_off','drop_off','fulfillment') 
+		and 	ec1.shp_carrier_id      in (1703373469, 	1313953487,		542124431,		17501740,	1071639903,		17243954,	849817033)  Esto hay que parametrizarlo, usar misma logica que places.
+		and 	ec1.shp_checkpoint_date is not null 
+		AND 	ec2.shp_checkpoint_date is null  
+		AND 	ec3.shp_checkpoint_date is null 
+),
+ 
+-- Calcula lo que es FORWARDS
+DO_FORWARD AS (
+ 
+	SELECT 		
+				SHP_SHIPMENT_ID, 
+				1 AS CASO 
+
+	FROM 		DO_TOTAL 
+	WHERE 
+				shp_type                  	in ('forward') 
+			AND shp_datetime_shipped_id   	is null 
+			AND shp_datetime_delivered_id 	is null 
+			AND (TMS_HUB_STATUS_ID        	IN ('cancelled','picked_up','not_tax_authorized','tax_authorized') or TMS_HUB_STATUS_ID is nulL)
+			AND (ec8_shp_checkpoint_date  	IS NULL   or   
+				(ec8_shp_checkpoint_date 	is not null  and  ec7_shp_checkpoint_date is not null))
+),
+
+	-- Calcula todo lo que es RETURN
+DO_RETURN AS (
+
+	SELECT 		SHP_SHIPMENT_ID, 
+				2 AS CASO 
+
+	FROM 		DO_TOTAL 
+	WHERE 
+				shp_type 				in ('return') 
+		AND 	C4_SHP_STATUS 			IS NULL
+),
+
+-- Places de Picking up
+PU_FORWARD AS (
+
+	SELECT 		BPP.SHP_SHIPMENT_ID, 
+				3 AS CASO 
+				
+	FROM		`SBOX_CX_BI_ADS_CORE.BT_CX_BPP_CAUSE` 			BPP
+	INNER JOIN 	`WHOWNER.BT_SHP_SHIPMENTS` 						S   
+															ON     	BPP.SIT_SITE_ID     	= S.SIT_SITE_ID
+															AND 	BPP.SHP_SHIPMENT_ID 	= S.SHP_SHIPMENT_ID
+
+	LEFT JOIN   WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec1
+															on     	ec1.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec1.shp_status      	= 'shipped' 
+															and 	ec1.shp_sub_status		= 'waiting_for_withdrawal'
+
+	LEFT JOIN   WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec2 
+															on     	ec2.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec2.shp_status      	= 'not_delivered' 
+															and 	ec2.shp_sub_status  	= 'returning_to_sender'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec3 
+															on     	ec3.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec3.shp_status 			= 'not_delivered' 
+															and 	ec3.shp_sub_status 		= 'returning_to_hub'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec4 
+															on     	ec4.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec4.shp_status 			= 'not_delivered' 
+															and 	ec4.shp_sub_status 		= 'returned_to_hub'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec5 
+															on   	ec5.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec5.shp_status 			= 'not_delivered' 
+															and 	ec5.shp_sub_status 		= 'returning_to_warehouse'
+
+	LEFT JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		ec7 
+															on     	ec7.shp_shipment_id 	= s.shp_shipment_id 
+															and 	ec7.shp_status 			= 'not_delivered' 
+															and 	ec7.shp_sub_status 		= 'picked_up_for_return'
+
+	WHERE
+			BPP.SIT_SITE_ID 		= 'MLM'
+		AND 	DATE_CREATED 		>= CAST('2022-07-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND 	DATE_CREATED 		< CAST('2022-08-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND 	BPP.CARRIER_ID 		= 'MELI Logistics'
+		AND 	ec1.shp_carrier_id 	in (1703373469,	1313953487,	542124431,	17501740,	1071639903,	17243954,	849817033) 
+		AND 	S.shp_substatus_id 	in ('stolen','lost','waiting_for_withdrawal','cancelled','waiting_for_return','damaged','destroyed','to_review') 
+		AND 	ec2.shp_date_created is null 
+		AND		ec3.shp_date_created is null 
+		AND		ec4.shp_date_created is null 
+		AND		ec5.shp_date_created is null 
+		AND		ec7.shp_date_created is null
+)
+
+	SELECT 	DISTINCT SHP_SHIPMENT_ID 
+	FROM 	(
+			SELECT SHP_SHIPMENT_ID FROM DO_RETURN
+		UNION ALL
+			SELECT SHP_SHIPMENT_ID FROM DO_FORWARD
+		UNION ALL
+			SELECT SHP_SHIPMENT_ID FROM PU_FORWARD
+			) 
+),
+
+Tabla_tramos AS (
+
+	SELECT
+				lchk.shp_shipment_iD,
+				lchk.shp_lg_date_created,
+				lchk.shp_lg_status        			as Tramo
+	FROM
+				`SBOX_CX_BI_ADS_CORE.BT_CX_BPP_CAUSE` 			BPP
+
+	INNER JOIN 	`WHOWNER.BT_SHP_SHIPMENTS` 						S
+															ON     	BPP.SIT_SITE_ID 		= S.SIT_SITE_ID
+															AND 	BPP.SHP_SHIPMENT_ID 	= S.SHP_SHIPMENT_ID
+
+	inner join 	WHOWNER.BT_SHP_LG_SHIPMENT_CHECKPOINTS 	AS		lchk	
+															on   	lchk.shp_shipment_id 	= s.shp_shipment_id
+
+	where 
+			(lchk.shp_lg_status     	in 	('on_route','on_way','on_hub')) or (lchk.shp_lg_status in ('at_station')
+		and lchk.shp_lg_sub_status 		in 	('sorting','in_container','ready_to_deliver'))
+		and BPP.SIT_SITE_ID 			= 	'MLM'
+		AND DATE_CREATED 				>= 	CAST('2022-07-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND DATE_CREATED 				< 	CAST('2022-08-01' AS DATE FORMAT 'YYYY-MM-DD')
+		AND BPP.CARRIER_ID 				= 	'MELI Logistics'
+		and s.SHP_SOURCE_ID 			= 	'MELI'
+		and s.shp_shipping_mode_id 		= 	'me2'
+		and s.shp_type 					= 	'forward'
+
+	qualify row_number() over(partition by lchk.shp_shipment_id order by lchk.shp_lg_date_created DESC) = 1
+),
+
+in_hub_t as (
+
+	SELECT
+				distinct(chk.shp_shipment_id),
+				cast(shp_date_created as date) 		as Fecha_in_hub,
+				shp_date_created                   	as date_in_hub  
+	FROM   
+				`SBOX_CX_BI_ADS_CORE.BT_CX_BPP_CAUSE` 			BPP
+	  
+	INNER JOIN 	WHOWNER.BT_SHP_ELASTICSEARCH_CHECKPOINTS 		chk
+															ON 		BPP.SHP_SHIPMENT_ID = CHK.SHP_SHIPMENT_ID
+
+	WHERE    	
+				BPP.SIT_SITE_ID 		= 	'MLM'
+		AND 	DATE_CREATED 			>= 	CAST('2022-07-01' 	AS DATE FORMAT 'YYYY-MM-DD')
+		AND 	DATE_CREATED 			< 	CAST('2022-08-01'  AS DATE FORMAT 'YYYY-MM-DD') 
+		AND  	chk.shp_status 			=	'ready_to_ship' 
+		and 	chk.shp_sub_status 		in 	( 'in_hub', 'authorized_by_carrier')
+
+
+	qualify row_number() over(partition by chk.shp_shipment_id order by chk.shp_date_created ASC) = 1
+)
+
+
+SELECT
+		'BPP',
+		
+		BPP.SHP_SHIPMENT_ID,
+		
+		
+        CASE 
+			WHEN PL.SHP_SHIPMENT_ID IS NOT NULL          	THEN	'place' 
+			ELSE 
+				CASE 
+					WHEN SHP_LG_PRODUCT_TYPE = 'crowd'      THEN 	'crowd'
+					ELSE                                            'logistics' 
+				END 
+        END 
+            AS PRODUCTO,   	
+       (case 
+			when bpp.SHP_LG_STEP_TYPE = 'melione'           then 	'melione'
+			when SHP.shp_status_id    = 'delivered'         then 	'last_mile'
+			when Tramo = 'on_hub'                           then 	'middle_mile'   
+			when Tramo = 'on_way'                           then 	'middle_mile'    
+			when Tramo = 'at_station'                       then 	'last_mile'       
+			when Tramo = 'on_route'                         then 	'last_mile'
+			when iht.shp_shipment_id is not null	  	    then 	'middle_mile'  
+			else                                            		'first_mile' 
+        end) 
+            as Tramo_CO  , 
+		CASE AUD_COVERAGE_TRACK_C,
+		COV_CASHOUT_LC  + BPP_BONIF_LC,
+		COV_CASHOUT_USD + BPP_BONIF_USD
+		
+		
+FROM
+		(
+			SELECT 	BPP.SIT_SITE_ID,BPP.SHP_SHIPMENT_ID, 
+			        BPP.SIT_SITE_ID,		
+					SHP_LG_PRODUCT_TYPE,  
+					SHP_LG_STEP_TYPE 
+
+			FROM  		`SBOX_CX_BI_ADS_CORE.DM_BPP_COVERAGE`		BPP 
+
+			LEFT JOIN 	`WHOWNER.BT_SHP_LG_SHIPMENTS_ROUTES`   		R    
+																ON 		R.SIT_SITE_ID     = BPP.SIT_SITE_ID
+																AND 	R.SHP_SHIPMENT_ID = BPP.SHP_SHIPMENT_ID
+
+			LEFT JOIN 	`WHOWNER.BT_SHP_LG_PRE_INVOICE_ROUTES` 		RB   
+																ON 		RB.SIT_SITE_ID			  		= R.SIT_SITE_ID
+																AND 	RB.SHP_LG_PRE_INVOICE_ENTITY_ID = R.SHP_LG_ROUTE_ID
+
+			WHERE		BPP.SIT_SITE_ID 	= 	'MLM'
+				AND 	DATE_CREATED 		>= 	CAST('2022-07-01' AS DATE FORMAT 'YYYY-MM-DD')
+				AND 	DATE_CREATED 		< 	CAST('2022-08-01' AS DATE FORMAT 'YYYY-MM-DD')
+				AND 	BPP.CARRIER_ID 		= 	'MELI Logistics'
+
+			  qualify row_number() over(partition by BPP.shp_shipment_id order by  R.SHP_LG_ROUTE_ID DESC) = 1
+        ) BPP
+
+LEFT JOIN	PLACES       				PL 
+									ON 		BPP.SHP_SHIPMENT_ID = PL.SHP_SHIPMENT_ID
+
+LEFT JOIN  	Tabla_tramos 				TR
+									ON 		BPP.SHP_SHIPMENT_ID = TR.SHP_SHIPMENT_ID
+
+left join 	WHOWNER.BT_SHP_SHIPMENTS	shp  
+                                    on 		shp.SIT_SITE_ID     = bpp.SIT_SITE_ID 
+                                   	and 	shp.shp_shipment_id = bpp.shp_shipment_id
+
+left join	in_hub_t     				iht   
+                                    on 		iht.shp_shipment_id = bpp.shp_shipment_id
+
+GROUP BY 1,2
+
